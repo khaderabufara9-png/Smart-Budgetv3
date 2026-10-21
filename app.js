@@ -15,12 +15,13 @@ const auth = firebase.auth();
 
 /* ==================== المتغيرات الأساسية ==================== */
 let currentUserId = null;
+let currentUserRole = null; // سيتم تحديثه لـ admin عند دخول المالك
 let currentCurrency = localStorage.getItem('appCurrency') || "ج.م"; 
 let currentLang = localStorage.getItem('appLang') || 'ar'; 
 let personalName = localStorage.getItem('personalName') || ""; 
 let isDarkMode = localStorage.getItem('isDarkMode') !== 'false'; 
 let appPin = localStorage.getItem('appPin') || null; 
-const APP_VERSION = "5.0";
+const APP_VERSION = "6.0"; // تحديث النسخة لحل المشاكل
 
 let expenses = []; let savings = []; let budgetData = { amount: 0, startDate: '', endDate: '' }; let savedProducts = {}; let currencyWatchers = []; let coinSavings = 0;
 let myChart; let catChart; let toastTimeout; let currentScannerTarget = 'expense'; let clockInterval; let exchangeRates = {};
@@ -37,15 +38,15 @@ auth.onAuthStateChanged((user) => {
     const appLockScreen = document.getElementById('appLockScreen');
     
     if (user) {
-        // تم تسجيل الدخول
         currentUserId = user.uid;
+        currentUserRole = 'admin'; // منح صلاحيات الإدارة للوصول لكل الميزات
+        
         document.getElementById('userEmailDisplay').innerText = user.email;
         if(user.photoURL) {
             const profImg = document.getElementById('userProfilePic');
             profImg.src = user.photoURL; profImg.classList.remove('hidden');
         }
         
-        // جلب البيانات من السحابة
         loadDataFromFirebase().then(() => {
             if (splash) splash.style.display = 'none';
             loginScreen.classList.add('hidden');
@@ -54,8 +55,8 @@ auth.onAuthStateChanged((user) => {
             else { appContainer.classList.remove('hidden'); bootApp(); }
         });
     } else {
-        // غير مسجل دخول
         currentUserId = null;
+        currentUserRole = null;
         if (splash) splash.style.display = 'none';
         loginScreen.classList.remove('hidden');
         appContainer.classList.add('hidden');
@@ -100,7 +101,7 @@ function saveDataToFirebase() {
 
 /* ==================== دوال التطبيق الأساسية ==================== */
 function bootApp() {
-    applyTheme(); setLanguage(currentLang);
+    applyTheme(); setLanguage(currentLang); applyRoleRestrictions();
     const pInput = document.getElementById('personalNameInput'); if(pInput) pInput.value = personalName;
     const pToggle = document.getElementById('pinToggle'); if(pToggle) pToggle.checked = appPin !== null;
     const currSelect = document.getElementById('currencySelect'); if(currSelect) currSelect.value = currentCurrency; 
@@ -114,6 +115,21 @@ window.unlockApp = function() {
     if (inputEl && inputEl.value === appPin) { document.getElementById('appLockScreen').classList.add('hidden'); document.getElementById('appContainer').classList.remove('hidden'); inputEl.value = ''; bootApp(); } 
     else { showToast("الرمز غير صحيح", "error"); }
 }
+
+// حل مشكلة الدخول إلى إعدادات الميزانية
+window.openBudgetModalSafe = function() {
+    if (currentUserRole !== 'admin' && currentUserRole !== 'user') return;
+    
+    // تعبئة البيانات القديمة في النافذة إذا كانت موجودة (حل مشكلة المسح كل مرة)
+    if (budgetData) {
+        document.getElementById('modalBudgetAmount').value = budgetData.amount || '';
+        document.getElementById('modalStartDate').value = budgetData.startDate || '';
+        document.getElementById('modalEndDate').value = budgetData.endDate || '';
+    }
+    
+    openModal('budgetModal');
+}
+
 window.toggleAppPin = function() { const toggle = document.getElementById('pinToggle'); const isChecked = toggle ? toggle.checked : false; if (isChecked) { const newPin = prompt("أدخل رمز PIN من 4 أرقام:"); if (newPin && newPin.length >= 4) { appPin = newPin; localStorage.setItem('appPin', appPin); showToast("تم تفعيل القفل", "success"); } else { if(toggle) toggle.checked = false; } } else { appPin = null; localStorage.removeItem('appPin'); showToast("تم إلغاء القفل", "warning"); } }
 function applyTheme() { const toggleBtn = document.getElementById('themeToggle'); if (toggleBtn) toggleBtn.checked = isDarkMode; if (isDarkMode) document.documentElement.classList.add('dark'); else document.documentElement.classList.remove('dark'); }
 window.toggleTheme = function() { const toggleBtn = document.getElementById('themeToggle'); isDarkMode = toggleBtn ? toggleBtn.checked : true; localStorage.setItem('isDarkMode', isDarkMode); applyTheme(); }
@@ -128,6 +144,12 @@ window.setLanguage = function(lang) {
     currentLang = lang; localStorage.setItem('appLang', lang); const htmlDoc = document.getElementById('htmlDoc'); if(htmlDoc) { htmlDoc.dir = lang === 'ar' ? 'rtl' : 'ltr'; htmlDoc.lang = lang; }
     document.querySelectorAll('[data-i18n]').forEach(el => { const key = el.getAttribute('data-i18n'); if (trans[lang] && trans[lang][key]) { if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') el.placeholder = trans[lang][key]; else el.innerText = trans[lang][key]; } });
     updateGreeting(); if(currentUserId) { updateStats(); renderExpenses(); renderSavingsList(); updateAnalytics(); updateCoinDisplay(); }
+}
+
+function applyRoleRestrictions() { 
+    const dangerZone = document.getElementById('dangerZone'); 
+    if (currentUserRole === 'admin') { if(dangerZone) dangerZone.classList.remove('hidden'); } 
+    else { if(dangerZone) dangerZone.classList.add('hidden'); } 
 }
 
 /* ==================== العمليات وحفظ البيانات في السحابة ==================== */
@@ -218,10 +240,58 @@ function initSwipe() {
     });
 }
 
+/* ==================== نظام الإحصائيات والتنبيهات المزدوج (تمت الإضافة) ==================== */
 function updateStats() {
-    const exp = expenses.reduce((s, e) => s + e.amount, 0); const curSav = savings.filter(s => s.type === 'current').reduce((s, a) => s + a.amount, 0); const preSav = savings.filter(s => s.type === 'previous').reduce((s, a) => s + a.amount, 0);
-    const totSav = curSav + preSav; const rem = budgetData.amount - exp - curSav;
-    const warningEl = document.getElementById('budgetWarningAlert'); if (warningEl) { if (budgetData.amount > 0 && (exp / budgetData.amount) >= 0.8) warningEl.classList.remove('hidden'); else warningEl.classList.add('hidden'); }
+    const exp = expenses.reduce((s, e) => s + e.amount, 0); 
+    const curSav = savings.filter(s => s.type === 'current').reduce((s, a) => s + a.amount, 0); 
+    const preSav = savings.filter(s => s.type === 'previous').reduce((s, a) => s + a.amount, 0);
+    const totSav = curSav + preSav; 
+    const rem = budgetData.amount - exp - curSav;
+    
+    // نظام التحذير اليومي المزدوج
+    const warningEl = document.getElementById('budgetWarningAlert'); 
+    const warningText = document.getElementById('warningMessageText');
+    
+    if (warningEl && warningText) { 
+        let isWarning = false;
+        let warningMessage = "";
+        
+        // 1. فحص تجاوز 80% من الميزانية الكلية
+        if (budgetData.amount > 0 && (exp / budgetData.amount) >= 0.8) {
+            isWarning = true;
+            warningMessage = "⚠️ لقد استهلكت أكثر من 80% من ميزانيتك الكلية!";
+        } 
+        
+        // 2. فحص الحد اليومي (إذا لم يكن هناك تحذير كلي)
+        if (!isWarning && budgetData.amount > 0 && budgetData.startDate && budgetData.endDate) {
+            const start = new Date(budgetData.startDate).setHours(0,0,0,0);
+            const end = new Date(budgetData.endDate).setHours(0,0,0,0);
+            const today = new Date().setHours(0,0,0,0);
+            
+            // تأكد أننا داخل فترة الميزانية
+            if (today >= start && today <= end) {
+                const totalDays = Math.max(1, Math.ceil((end - start) / 86400000) + 1);
+                const dailyLimit = budgetData.amount / totalDays;
+                
+                // حساب مصاريف اليوم فقط
+                const todayExp = expenses.filter(e => isSameDay(new Date(e.date), new Date())).reduce((s, e) => s + e.amount, 0);
+                
+                if (todayExp > dailyLimit) {
+                    isWarning = true;
+                    warningMessage = `⚠️ تجاوزت الحد اليومي! صرفت اليوم ${todayExp} والحد المسموح ${Math.floor(dailyLimit)} ${currentCurrency}`;
+                }
+            }
+        }
+        
+        if (isWarning) {
+            warningText.innerText = warningMessage;
+            warningEl.classList.remove('hidden');
+            warningEl.classList.add('flex');
+        } else {
+            warningEl.classList.add('hidden');
+            warningEl.classList.remove('flex');
+        }
+    }
     
     const totSavDisplay = document.getElementById('totalSavingsAmountDisplay'); if (totSavDisplay) { totSavDisplay.innerHTML = `${totSav.toLocaleString()} <span class="text-lg text-gray-500 currency-symbol">${currentCurrency}</span>`; }
     const curSavDisplay = document.getElementById('currentSavingsDisplay'); if(curSavDisplay) curSavDisplay.innerText = curSav.toLocaleString();
@@ -256,6 +326,7 @@ function showToast(message, type) {
 }
 
 window.exportData = function() { if(expenses.length === 0 && savings.length === 0) return; let csv = "data:text/csv;charset=utf-8,%EF%BB%BFType,Date,Category,Description,Amount\n"; expenses.forEach(e => csv += `"Expense","${new Date(e.date).toLocaleDateString()}","${trans[currentLang][e.category]||e.category}","${e.description}","${e.amount}"\n`); savings.forEach(s => csv += `"Savings","${new Date(s.date).toLocaleDateString()}","${s.type}","Deposit","${s.amount}"\n`); const link = document.createElement("a"); link.href = encodeURI(csv); link.download = "data.csv"; document.body.appendChild(link); link.click(); link.remove(); }
+window.clearAllData = function() { if (currentUserRole !== 'admin') return; if(confirm("حذف كل البيانات من السحابة؟ (لا يمكن التراجع)")) { expenses = []; savings = []; budgetData = {amount:0,startDate:'',endDate:''}; savedProducts = {}; currencyWatchers = []; coinSavings = 0; saveDataToFirebase(); updateStats(); const f = document.getElementById('filterInput'); renderExpenses(f?f.value:"الكل"); renderSavingsList(); renderWatchers(); closeModal('settingsModal'); updateCoinDisplay(); showToast("تم مسح البيانات", "success"); } }
 window.switchView = function(viewName) { document.querySelectorAll('.view-section').forEach(el => { el.classList.remove('block'); el.classList.add('hidden'); }); const view = document.getElementById(`view-${viewName}`); if(view) { view.classList.remove('hidden'); view.classList.add('block'); } document.querySelectorAll('.nav-btn').forEach(btn => { btn.classList.remove('text-blue-600'); btn.classList.add('text-gray-400'); }); if(viewName !== 'add') { const nav = document.getElementById(`nav-${viewName}`); if(nav) { nav.classList.remove('text-gray-400'); nav.classList.add('text-blue-600'); } } closeActionSheet(); if(viewName === 'analytics') updateAnalytics(); }
 window.openActionSheet = function() { const s = document.getElementById('actionSheet'); if(s) { s.classList.remove('hidden'); setTimeout(() => { const c = document.getElementById('actionSheetContent'); if(c) c.classList.remove('translate-y-full'); }, 10); } }
 window.closeActionSheet = function() { const c = document.getElementById('actionSheetContent'); if(c) { c.classList.add('translate-y-full'); setTimeout(() => { const s = document.getElementById('actionSheet'); if(s) s.classList.add('hidden'); }, 300); } }
